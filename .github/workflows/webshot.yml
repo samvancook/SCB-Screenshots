@@ -92,7 +92,8 @@ jobs:
             await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: +NAV_TIMEOUT_MS });
 
             // Give it a moment to render
-            await page.waitForTimeout(2000);
+            await new Promise(r => setTimeout(r, 2000));
+
 
             // 3) Save screenshot
             fs.mkdirSync(dir, { recursive: true });
