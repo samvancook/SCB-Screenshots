@@ -1,25 +1,22 @@
-name: Daily Webshot
+name: Daily Webshot (SCB Distributors)
 
 on:
   schedule:
-    # Runs daily at 15:00 UTC (10:00 AM during CDT, 9:00 AM during CST in America/Chicago)
-    - cron: "0 15 * * *"
-  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+    - cron: "0 15 * * *"   # 10:00 AM CDT / 9:00 AM CST (America/Chicago)
+  workflow_dispatch: {}
 
 permissions:
-  contents: write   # allow the workflow to push commits using GITHUB_TOKEN
+  contents: write
 
 jobs:
   snap:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    strategy:
-      fail-fast: false
-      # Add more URLs here if you want multiple pages snapshotted
-      matrix:
-        url:
-          - "https://example.com"
+    timeout-minutes: 15
+    env:
+      TARGET_URL: "https://scbdistributors.com/cgi-bin/sales/report.cgi?report=netSales"
+      VIEWPORT_W: "1366"
+      VIEWPORT_H: "768"
+      NAV_TIMEOUT_MS: "60000"
 
     steps:
       - name: Check out repo
@@ -34,45 +31,82 @@ jobs:
 
       - name: Install Puppeteer
         run: |
-          npm init -y
+          npm init -y > /dev/null
           npm i puppeteer@22
 
-      - name: Take screenshot
-        id: shot
+      - name: Take screenshot (login + report)
+        env:
+          SCB_LOGIN_URL: ${{ secrets.SCB_LOGIN_URL }}
+          SCB_USERNAME:  ${{ secrets.SCB_USERNAME }}
+          SCB_PASSWORD:  ${{ secrets.SCB_PASSWORD }}
+          SCB_USER_SELECTOR:  ${{ secrets.SCB_USER_SELECTOR }}
+          SCB_PASS_SELECTOR:  ${{ secrets.SCB_PASS_SELECTOR }}
+          SCB_SUBMIT_SELECTOR: ${{ secrets.SCB_SUBMIT_SELECTOR }}
         run: |
           node - <<'NODE'
-          import puppeteer from 'puppeteer';
+          import puppeteer from "puppeteer";
+          import fs from "fs";
 
-          // Inputs
-          const url = process.env.TARGET_URL;
-
-          // Timestamp like 2025-10-24_10-00-00
-          const pad = n => String(n).padStart(2,'0');
+          const pad = n => String(n).padStart(2,"0");
           const now = new Date();
           const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-          const host = new URL(url).hostname.replace(/[^a-z0-9.-]/gi,'_');
+
+          const {
+            TARGET_URL, VIEWPORT_W, VIEWPORT_H, NAV_TIMEOUT_MS,
+            SCB_LOGIN_URL, SCB_USERNAME, SCB_PASSWORD,
+            SCB_USER_SELECTOR, SCB_PASS_SELECTOR, SCB_SUBMIT_SELECTOR
+          } = process.env;
+
+          const host = new URL(TARGET_URL).hostname.replace(/[^a-z0-9.-]/gi,"_");
           const dir  = `shots/${host}`;
           const path = `${dir}/${ts}.png`;
 
-          const browser = await puppeteer.launch({ args: ['--no-sandbox'] });
+          const browser = await puppeteer.launch({
+            args: ["--no-sandbox","--disable-setuid-sandbox"],
+            headless: "new"
+          });
           const page = await browser.newPage();
-          await page.setViewport({ width: 1366, height: 768 });
-          await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
-          // Give client-side apps a moment to finish rendering
-          await page.waitForTimeout(1500);
-          await page.screenshot({ path, fullPage: true });
-          await browser.close();
+          await page.setViewport({ width: +VIEWPORT_W, height: +VIEWPORT_H });
 
-          console.log("Saved", path);
+          try {
+            // Optional niceties to look more like a real browser and keep local time consistent
+            try { await page.emulateTimezone("America/Chicago"); } catch {}
+            await page.setUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36");
+
+            // 1) Login
+            console.log("Logging in…", SCB_LOGIN_URL);
+            await page.goto(SCB_LOGIN_URL, { waitUntil: "networkidle2", timeout: +NAV_TIMEOUT_MS });
+
+            // The form has: input[name="Username"], input[name="Password"], input[name="submit"]
+            await page.waitForSelector(SCB_USER_SELECTOR, { timeout: +NAV_TIMEOUT_MS });
+            await page.type(SCB_USER_SELECTOR, SCB_USERNAME, { delay: 20 });
+            await page.type(SCB_PASS_SELECTOR, SCB_PASSWORD, { delay: 20 });
+
+            await Promise.all([
+              page.click(SCB_SUBMIT_SELECTOR),
+              page.waitForNavigation({ waitUntil: "networkidle2", timeout: +NAV_TIMEOUT_MS })
+            ]);
+
+            // 2) Go to the report page
+            console.log("Opening report page…", TARGET_URL);
+            await page.goto(TARGET_URL, { waitUntil: "networkidle2", timeout: +NAV_TIMEOUT_MS });
+
+            // Give it a moment to render
+            await page.waitForTimeout(2000);
+
+            // 3) Save screenshot
+            fs.mkdirSync(dir, { recursive: true });
+            await page.screenshot({ path, fullPage: true });
+            console.log("Saved", path);
+          } finally {
+            await browser.close();
+          }
           NODE
-        env:
-          TARGET_URL: ${{ matrix.url }}
 
       - name: Commit & push images
         run: |
           git config user.name  "webshot-bot"
           git config user.email "webshot-bot@users.noreply.github.com"
           git add shots
-          # Don't fail if nothing changed (e.g., if a previous run already created a shot at the same second)
-          git commit -m "Daily webshot" || echo "Nothing to commit"
+          git commit -m "Daily SCB webshot" || echo "Nothing to commit"
           git push
